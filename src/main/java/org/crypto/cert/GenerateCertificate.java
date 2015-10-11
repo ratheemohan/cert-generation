@@ -1,69 +1,90 @@
 package org.crypto.cert;
 
-import sun.security.x509.*;
+import com.google.common.base.Strings;
+import org.bouncycastle.asn1.x509.BasicConstraints;
+import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x509.GeneralNames;
+import org.bouncycastle.asn1.x509.X509Extensions;
+import org.bouncycastle.x509.X509V3CertificateGenerator;
+import org.bouncycastle.x509.extension.AuthorityKeyIdentifierStructure;
+import org.bouncycastle.x509.extension.SubjectKeyIdentifierStructure;
 
+import javax.security.auth.x500.X500Principal;
+import java.io.File;
 import java.io.FileOutputStream;
+import java.nio.file.Paths;
 import java.security.cert.*;
 import java.security.*;
 import java.math.BigInteger;
+import java.util.Calendar;
 import java.util.Date;
-import java.io.IOException;
 
 public class GenerateCertificate {
 
-    private final static String CERTIFICATE_GENERATION_ALGORITHM = "SHA1withRSA";
+    private final static String CERTIFICATE_GENERATION_ALGORITHM = "SHA256WithRSAEncryption";
+    private final static int KEY_SIZE = 1024;
 
     public GenerateCertificate(){
 
     }
 
-    public X509Certificate generateCertificate(final CertificateProperties certificateProperties) throws Exception{
+    static {
+        Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
+    }
+
+    public byte[] generateCertificate(final CertificateProperties certificateProperties) throws Exception{
         final KeyPair keyPair = certificateKeyPair();
-        final PrivateKey privkey = keyPair.getPrivate();
-        final X509CertInfo info = new X509CertInfo();
-        final Date from = new Date();
-        final Date to = new Date(from.getTime() + certificateProperties.expiryDays() * 86400000l);
-        final CertificateValidity interval = new CertificateValidity(from, to);
-        final BigInteger sn = new BigInteger(64, new SecureRandom());
-        final X500Name owner = new X500Name(certificateProperties.dn());
+        final Date startDate = new Date();
+        final Date expiryDate = new Date(certificateProperties.expiryInMilliSeconds());
+        final BigInteger serialNumber = BigInteger.valueOf(new SecureRandom().nextInt(Integer.MAX_VALUE));
+        final PrivateKey caKey = keyPair.getPrivate();
+        final X509V3CertificateGenerator certGen = new X509V3CertificateGenerator();
+        final X500Principal subjectName = new X500Principal(certificateProperties.dn());
 
-        info.set(X509CertInfo.VALIDITY, interval);
-        info.set(X509CertInfo.SERIAL_NUMBER, new CertificateSerialNumber(sn));
-        info.set(X509CertInfo.SUBJECT, new CertificateSubjectName(owner));
-        info.set(X509CertInfo.ISSUER, new CertificateIssuerName(owner));
-        info.set(X509CertInfo.KEY, new CertificateX509Key(keyPair.getPublic()));
-        info.set(X509CertInfo.VERSION, new CertificateVersion(CertificateVersion.V3));
-        AlgorithmId algo = new AlgorithmId(AlgorithmId.md5WithRSAEncryption_oid);
-        info.set(X509CertInfo.ALGORITHM_ID, new CertificateAlgorithmId(algo));
+        certGen.setSerialNumber(serialNumber);
+        certGen.setIssuerDN(subjectName);
+        certGen.setNotBefore(startDate);
+        certGen.setNotAfter(expiryDate);
+        certGen.setSubjectDN(subjectName);
+        certGen.setPublicKey(keyPair.getPublic());
+        certGen.setSignatureAlgorithm(CERTIFICATE_GENERATION_ALGORITHM);
 
-        // Sign the cert to identify the algorithm that's used.
-        X509CertImpl cert = new X509CertImpl(info);
-        cert.sign(privkey, CERTIFICATE_GENERATION_ALGORITHM);
+        certGen.addExtension(X509Extensions.BasicConstraints, false, new BasicConstraints(true, 0));
+        certGen.addExtension(X509Extensions.AuthorityKeyIdentifier, false, new AuthorityKeyIdentifierStructure(keyPair.getPublic()));
+        certGen.addExtension(X509Extensions.SubjectKeyIdentifier, false, new SubjectKeyIdentifierStructure(keyPair.getPublic()));
+        if (!Strings.isNullOrEmpty(certificateProperties.subjectiveAlternateName())) {
+            certGen.addExtension(X509Extensions.SubjectAlternativeName, false, new GeneralNames(
+                    new GeneralName(GeneralName.rfc822Name, "Meeting Manager")));
+        }
 
-        // Update the algorithm, and resign.
-        algo = (AlgorithmId)cert.get(X509CertImpl.SIG_ALG);
-        info.set(CertificateAlgorithmId.NAME + "." + CertificateAlgorithmId.ALGORITHM, algo);
-        cert = new X509CertImpl(info);
-        cert.sign(privkey, CERTIFICATE_GENERATION_ALGORITHM);
+        final X509Certificate cert = certGen.generate(caKey, "BC");
 
-        final FileOutputStream fileOutputStream = new FileOutputStream("/tmp/test.cert");
-        fileOutputStream.write(cert.getEncoded());
-
-        return cert;
+        if (certificateProperties.saveCertificate()) {
+            FileOutputStream fileOutputStream = new FileOutputStream(Paths.get(certificateProperties.filePath(),
+                    File.separator, certificateProperties.certificateFileName()).toString());
+            fileOutputStream.write(cert.getEncoded());
+        }
+        return cert.getEncoded();
     }
 
     private KeyPair certificateKeyPair() throws Exception {
-        KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA");
-        keyPairGenerator.initialize(1024);
+        final KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA");
+        keyPairGenerator.initialize(KEY_SIZE);
         return keyPairGenerator.generateKeyPair();
     }
 
     public static void main(String[] args) throws Exception{
         final GenerateCertificate generateCertificate = new GenerateCertificate();
+        final Calendar calendar = Calendar.getInstance();
+        calendar.set(2020,10,10);
         final CertificateProperties certificateProperties = CertificateProperties.builder()
                 .withDn("CN= Meeting Manager, OU=UBS, O=UBS L=CH, C=CH")
-                .withExpiryDays(720)
+                .withExpiryInMillSeconds(calendar.getTimeInMillis())
+                .withFileLocation("/tmp/")
+                .withCertificateFileName("test.cert")
+                .withSaveCertificate(true)
                 .build();
+
         generateCertificate.generateCertificate(certificateProperties);
     }
 
